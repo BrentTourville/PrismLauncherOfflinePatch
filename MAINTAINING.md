@@ -80,3 +80,105 @@ The automation commits as the standard GitHub Actions identity.
 verify their own builds. Both are opaque by design: one is a hash with no public
 preimage, the other a public verification key. They are not decoded here and
 should not be.
+
+## Multi-platform builds (kit 6)
+
+Since kit 6 a run builds every platform the official release leads with, in
+parallel, and pools them into one release per tag:
+
+- **Windows-MSVC** (`windows-2022`): the bare `PrismLauncher.exe` plus
+  `PrismLauncher-Windows-MSVC-Portable-<tag>.zip` from the tag's own
+  packaging action. The NSIS installer is built as a side effect of that
+  action but intentionally not attached: an unsigned installer adds
+  SmartScreen friction for nothing, the portable zip covers the same need.
+- **Linux x86_64** (`ubuntu-24.04`): AppImage + portable tarball from the
+  tag's own packaging action. GPG signing inputs stay unset, so the
+  AppImage is unsigned (the action warns and continues). Its zsync update
+  field points at the copy's own releases; it is harmless and unused here,
+  since the in-app updater is official-build territory.
+- **macOS universal** (`macos-26`, deployment 12.0, Qt 6.9.3): DMG, ad-hoc
+  signed (`AdhocSignedApp.entitlements`), notarization skipped without
+  credentials. This is the only channel macOS has on the kit - the Sparkle
+  self-updater path stays unused, so macOS updates are manual replacements.
+
+### How the recipes are read
+
+`scripts/common.ps1` reads each platform's matrix entry out of the tag's own
+`build.yml` (`Get-UpstreamPlatformRecipe`) and validates presets against the
+tag's `CMakePresets.json`. Strictness when a recipe cannot be read:
+
+- Windows recipe on a **stable** tag or a **manual** `upstream_ref`: fatal.
+  No build, no release, no state advance - the run shows red and retries.
+- Windows recipe on a **pre-release**: that pre-release is skipped, so it
+  can never block the stable build.
+- Linux/macOS recipes anywhere: the platform is skipped with a warning and
+  everything else still builds. Upstream restructuring its Linux or macOS
+  CI must never cost a copy its Windows exe.
+
+### The `platforms` repository variable
+
+`Settings > Secrets and variables > Actions > Variables > platforms`:
+comma or space separated subset of `windows`, `linux`, `macos`; empty or
+`all` means all three. A typo degrades gracefully (unknown names are warned
+about and ignored; an entirely invalid value builds all platforms instead
+of silently building nothing).
+
+Cost picture (standard runners): on a **public** repository all three
+platforms are free. On private repositories minutes multiply: Linux 1x,
+Windows 2x, macOS 10x - hence the variable.
+
+Two interactions worth knowing:
+
+- `force_rebuild` deletes and recreates a release, so the rebuilt release
+  contains only what this run produced. A rebuild while `platforms` excludes
+  a platform makes that platform's files vanish until the next unfiltered
+  build of the same tag - rebuild unfiltered to restore the full set.
+- The publish step no longer lives inside the build jobs: build jobs only
+  upload `release-<tag>-<platform>` artifacts, and one `publish` job merges
+  them per tag (patch bundle, one checksums.txt, release notes) and creates
+  or refreshes the release. A single failed platform turns the run red and
+  no tag is advanced in state - the next run rebuilds the whole trio.
+
+## The sync-from-template button (kit 7)
+
+Since kit 7 each copy has a second, manual-only workflow:
+**Sync kit files from template** (`workflow_dispatch`). It takes the
+template update for the user - the one-click route documented in the nudge
+issue - by doing exactly what the issue's terminal commands do: point a
+`template` remote at the kit's source, fetch, overlay the kit paths
+(`.github/workflows README.md MAINTAINING.md KIT-VERSION docs patches
+scripts`), commit as `github-actions[bot]` and push.
+
+Behavioral rules, all in `scripts/sync-kit.ps1`:
+
+- **Manual only.** Plain `workflow_dispatch`, no schedule. Updating a copy
+  must stay an explicit act; the nudge keeps carrying the guidance, the
+  button just makes acting on it beginner-friendly.
+- **Fail loud, unlike the nudge.** A user pressed a button: anything that
+  cannot complete is a red run with an explanatory message, not a silent
+  warning. The single soft spot is a push raced by a build run's state
+  heartbeat - one automatic `git pull --rebase` + push retry first (the
+  same rescue the issue text teaches).
+- **Idempotent.** Equal or newer versions push nothing and close any
+  stale notices; older versions sync and then close EVERY open
+  "Template update available" issue (they are all stale the moment the
+  push lands; normally there is exactly one, but hand-closed-then-refiled
+  churn can leave strays).
+- **Overlay semantics identical to the issue commands**: files still in
+  the template are refreshed; anything else in the copy is untouched,
+  including extra files a user has added inside `patches/` or `docs/`.
+  (Known pre-existing wrinkle, shared with the terminal route: files that
+  upstream later *removed* from the kit linger until removed by hand -
+  the kit avoids removals for exactly this reason.)
+- **Cost**: one runner-minute, on demand. The button does not build
+  anything; the next build run uses the new kit files.
+- The workflow is ASCII-clean, hardcoded to `TEMPLATE_SOURCE:
+  FMHYHelper/PrismLauncherOfflinePatch`, and refuses to sync the template
+  repository with itself.
+
+## Why the template itself publishes nothing (kit 6 shape)
+
+The `publish` job is gated on `vars.no_binaries != 'true'`, same as the old
+in-build publish step was. On this template the build matrix still runs - it
+proves the patches keep applying to real upstream tags - and then nothing is
+published; the finalize job treats a skipped publish as normal there.
