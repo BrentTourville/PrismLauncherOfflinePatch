@@ -81,25 +81,35 @@ verify their own builds. Both are opaque by design: one is a hash with no public
 preimage, the other a public verification key. They are not decoded here and
 should not be.
 
-## Multi-platform builds (kit 6)
+## Multi-platform builds (kit 6, release shape reshaped in kit 9)
 
 Since kit 6 a run builds every platform the official release leads with, in
 parallel, and pools them into one release per tag:
 
-- **Windows-MSVC** (`windows-2022`): the bare `PrismLauncher.exe` plus
-  `PrismLauncher-Windows-MSVC-Portable-<tag>.zip` from the tag's own
-  packaging action. The NSIS installer is built as a side effect of that
-  action but intentionally not attached: an unsigned installer adds
-  SmartScreen friction for nothing, the portable zip covers the same need.
-- **Linux x86_64** (`ubuntu-24.04`): AppImage + portable tarball from the
-  tag's own packaging action. GPG signing inputs stay unset, so the
+- **Windows-MSVC** (`windows-2022`): the bare `PrismLauncher.exe`, a
+  drop-in for the official `prismlauncher.exe`, and nothing else. The
+  tag's own packaging action still builds the NSIS installer and the
+  portable zip as side effects; neither is attached since kit 9. The
+  zip's old job (fresh starts, offline version-jump fallback) is covered
+  by the documented official-first update order: the official update
+  owns and rights the Qt runtime files, and the exe paste follows it.
+- **Linux x86_64** (`ubuntu-24.04`): the AppImage, nothing else - one
+  self-contained file that replaces the official AppImage; the platform
+  has no version-jump dance because the file carries its own Qt
+  runtime. The portable tarball is still built as a side effect and is
+  not attached since kit 9. GPG signing inputs stay unset, so the
   AppImage is unsigned (the action warns and continues). Its zsync update
   field points at the copy's own releases; it is harmless and unused here,
   since the in-app updater is official-build territory.
-- **macOS universal** (`macos-26`, deployment 12.0, Qt 6.9.3): DMG, ad-hoc
-  signed (`AdhocSignedApp.entitlements`), notarization skipped without
-  credentials. This is the only channel macOS has on the kit - the Sparkle
-  self-updater path stays unused, so macOS updates are manual replacements.
+- **macOS universal** (`macos-26`, deployment 12.0, Qt 6.9.3): the DMG,
+  the easy whole-app route, plus the bare universal binary
+  `prismlauncher-macos` staged out of the freshly packaged bundle for
+  the drop-in swap route - documented with its one-line arm64 re-sign in
+  the README's macOS tutorial. Upstream's action also writes a binary
+  zip as a side effect, not attached. The bundle and binary are ad-hoc
+  signed (`AdhocSignedApp.entitlements`) and notarization is skipped
+  without credentials, and the Sparkle self-updater path stays unused -
+  macOS updates are manual replacements on either route.
 
 ### How the recipes are read
 
@@ -156,9 +166,15 @@ Behavioral rules, all in `scripts/sync-kit.ps1`:
   button just makes acting on it beginner-friendly.
 - **Fail loud, unlike the nudge.** A user pressed a button: anything that
   cannot complete is a red run with an explanatory message, not a silent
-  warning. The single soft spot is a push raced by a build run's state
-  heartbeat - one automatic `git pull --rebase` + push retry first (the
-  same rescue the issue text teaches).
+  warning. Push refusals are sorted into two opposite classes (kit 10):
+  a push raced by a build run's state heartbeat - one automatic
+  `git pull --rebase` + push retry first (the same rescue the issue text
+  teaches); and GitHub's workflow-file rule - a *permanent* refusal (the
+  remote rejects any workflow-file push from GITHUB_TOKEN, and the kit's
+  overlay always carries workflow files), which is never retried and
+  fails with the exact KIT_PUSH_TOKEN setup steps. A refused
+  KIT_PUSH_TOKEN (expired or under-scoped token) is reported on its own,
+  without the heartbeat retry in between.
 - **Idempotent.** Equal or newer versions push nothing and close any
   stale notices; older versions sync and then close EVERY open
   "Template update available" issue (they are all stale the moment the
@@ -175,6 +191,36 @@ Behavioral rules, all in `scripts/sync-kit.ps1`:
 - The workflow is ASCII-clean, hardcoded to `TEMPLATE_SOURCE:
   FMHYHelper/PrismLauncherOfflinePatch`, and refuses to sync the template
   repository with itself.
+
+### The workflow-file push rule and KIT_PUSH_TOKEN (kit 10)
+
+The kit-9 rollout met the rule for real: a copy's button run synced kit 9
+and GitHub refused the push with *"refusing to allow a GitHub App to
+create or update workflow ... without workflows permission"*. GITHUB_TOKEN
+cannot carry that permission at all - it is absent from the token's scope
+table entirely, so no `permissions:` declaration can help - while the
+kit's overlay always includes `.github/workflows`. Kit 10 therefore does
+what the GitHub docs prescribe for exactly this case: a fine-grained
+personal access token (Contents + Workflows read/write, the copy's
+repository only) stored as the **secret** `KIT_PUSH_TOKEN`. When the
+secret exists, sync-kit.ps1 pushes through a one-shot token-in-URL push
+(`https://x-access-token:...@github.com/...` - never written into any
+config, never printed, and the runner masks the value regardless); when
+it does not exist, the refusal is detected, never race-retried, and the
+run fails loud with the setup steps.
+
+- The token path activates only for github.com https remotes; local
+  file-path origins (the dry-run rig) keep the plain push, so the rig
+  stays representative and nothing network-bound runs there. Rig
+  scenarios under a rejecting pre-receive hook prove the
+  classification: workflow-file diffs turn red with the setup text after
+  exactly one push attempt; non-workflow diffs push green.
+- Copies at kit 9 or older run their own button logic and cannot use the
+  token at all - their first hop to kit 10 is the terminal route (user
+  credentials carry full rights), one time, then the button and the
+  token take over. Copies created fresh from the template start at kit
+  10 with the logic already in their hands, and their nudge issue leads
+  them through the one-time token setup.
 
 ## Why the template itself publishes nothing (kit 6 shape)
 
