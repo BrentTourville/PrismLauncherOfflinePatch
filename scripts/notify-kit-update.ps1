@@ -89,7 +89,7 @@ try {
       $bodyTemplate = @'
 This copy of the offline-patch kit is **{LOCAL_VERSION}** while the template is now at **{REMOTE_VERSION}**. The template picked up changes (new or updated `patches/`, workflow, scripts, docs) that this copy does not have yet.
 
-Nothing has stopped working: this copy keeps building with the files it already has. But new upstream support, fixes and doc improvements only arrive after you take the template's updates.
+While you are behind, this copy **pauses its own builds**: the build workflow refuses to run an old kit, so no release can ever be published from outdated kit files. Nothing is broken and nothing needs deleting - syncing turns the builds back on, and new upstream support, fixes and doc improvements only arrive after you take the template's updates.
 
 ## Taking the update
 
@@ -124,9 +124,14 @@ every future sync stays one-click from then on:
 If this copy is still on **kit 9 or older**: its own button predates the
 token logic, so the *very next* sync (to kit 10) must take the
 **terminal way** below. After that one-time hop, the button with the
-token applies forever. And a button run that turns red saying
+token applies forever. A button run that turns red saying
 "refusing to allow a GitHub App to create or update workflow" means the
-secret is missing: step 1 above is the fix.
+push went out with the bot's credentials: on kits before 13 the secret
+could be silently overridden by the checkout's own bot-token header (kit
+13 strips it for the push), and on any kit it can mean the secret is
+missing - step 1 above is the fix for a missing secret. Either way the
+terminal way below always works and, once its sync lands, the button
+works with the token you already have.
 
 (To also get the new version's launcher compiled right away, afterwards click **"Build patched Prism Launcher"** -> **"Run workflow"** once. Otherwise the next scheduled run does it anyway.)
 
@@ -171,6 +176,14 @@ Set the repository **variable** (not a secret) `KIT_UPDATES_OFF` to `true`
 stops running entirely from the next run on. Closing this issue without
 syncing does not prevent a fresh one from being filed on a later run; the
 variable is the real opt-out.
+
+Two notes on what this opt-out does and does not do: it silences the
+*notice* only. The build workflow still refuses to run while the kit is
+behind the template - that pause is the point of kit 12 and is not part
+of this variable. The one documented bypass is the repository variable
+`build_if_old` set to `true`, which makes builds run even while behind
+(an emergency hatch, e.g. while a broken kit sits at the template's tip
+and you need a build regardless).
 '@
       $body = $bodyTemplate.Replace('{REMOTE_VERSION}', $remoteVersion).Replace('{LOCAL_VERSION}', $localVersion).Replace('{TEMPLATE_URL}', $template)
       $body | gh issue create --title $issueTitle --body-file -

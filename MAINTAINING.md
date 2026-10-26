@@ -27,6 +27,9 @@ mechanisms in the workflow enforce that:
   the stricter rule that a tag only counts as handled if a release for it
   exists in that repository - this covers copies that inherit the template's
   `.state/last-build.json` with no release history of their own.
+- The build matrix itself still runs here: it proves the patches keep
+  applying to real upstream tags, and then nothing is published. The
+  finalize job treats a skipped publish as normal for exactly this reason.
 
 ## Editing the template
 
@@ -87,12 +90,18 @@ Since kit 6 a run builds every platform the official release leads with, in
 parallel, and pools them into one release per tag:
 
 - **Windows-MSVC** (`windows-2022`): the bare `PrismLauncher.exe`, a
-  drop-in for the official `prismlauncher.exe`, and nothing else. The
-  tag's own packaging action still builds the NSIS installer and the
-  portable zip as side effects; neither is attached since kit 9. The
-  zip's old job (fresh starts, offline version-jump fallback) is covered
-  by the documented official-first update order: the official update
-  owns and rights the Qt runtime files, and the exe paste follows it.
+  drop-in for the official `prismlauncher.exe`, and nothing else. Since
+  kit 11 the job skips the tag's Windows packaging action entirely: its
+  NSIS installer, portable zip and binary zip were never claimed by the
+  kit, and its pinned NSCurl download (a fixed GitHub release fetched on
+  every run) was a pure external flake point - it killed a real copy run
+  on 2026-10-25 with the compile itself already green. The shipped exe
+  is the build tree's own `prismlauncher.exe` - the same recursive
+  search every kit-6+ run has used - so nothing the kit claims changes.
+  The zip's old job (fresh starts, offline version-jump fallback)
+  remains covered by the documented official-first update order: the
+  official update owns and rights the Qt runtime files, and the exe
+  paste follows it.
 - **Linux x86_64** (`ubuntu-24.04`): the AppImage, nothing else - one
   self-contained file that replaces the official AppImage; the platform
   has no version-jump dance because the file carries its own Qt
@@ -222,9 +231,66 @@ run fails loud with the setup steps.
   10 with the logic already in their hands, and their nudge issue leads
   them through the one-time token setup.
 
-## Why the template itself publishes nothing (kit 6 shape)
+### The stale-kit build gate (kit 12)
 
-The `publish` job is gated on `vars.no_binaries != 'true'`, same as the old
-in-build publish step was. On this template the build matrix still runs - it
-proves the patches keep applying to real upstream tags - and then nothing is
-published; the finalize job treats a skipped publish as normal there.
+A copy behind the template no longer builds at all. `decide.ps1` compares
+the copy's `KIT-VERSION` against the template's (one unauthenticated
+`raw.githubusercontent.com` fetch) and, when the copy is behind, emits
+`has_builds=false` - so the build matrix and publish skip through the
+existing gates, `finalize` still runs and advances nothing, and the run
+stays green. The rule came from a real run: a stale copy's manual rebuild
+burned a 30-minute Windows job dying in a flake zone kit 11 had already
+removed. Building from an old kit is never worth runner time.
+
+- The skip is loud by design: a `BUILDS SKIPPED` banner in the decide
+  log, a `::warning::` annotation, a run-summary line, and the nudge
+  issue (which also says builds are paused while behind). The run page
+  answers "why did nothing build" without opening any log.
+- Fail-open by contract: only a positive, parsed comparison (both
+  versions integers, local < remote) skips the run. Network trouble,
+  a missing file or an unparseable version builds as before, with a
+  warning line. `KIT_UPDATES_OFF` silences the notice but not the gate.
+- Bypasses: the template itself never gates (`GITHUB_REPOSITORY` equal
+  to `TEMPLATE_SOURCE` - it defines "current"); local batteries with
+  `KIT_TEST_RELEASES_FILE` bypass it; the gate itself is testable offline
+  via `KIT_TEST_TEMPLATE_KIT_VERSION`; and the repository variable
+  `build_if_old` = `true` is the documented emergency hatch (e.g. while
+  a broken kit sits at the template's tip and a copy needs builds now).
+- Gating lives in `decide` (one runner-minute job) rather than as a
+  `needs:` edge on the build job, so no job-skip cascade semantics are
+  involved: everything downstream rides the existing has_builds=false
+  path that "nothing new upstream" runs have always taken.
+
+### The checkout header override and its fix (kit 13)
+
+The kit-10 token path met a real override in the wild: the copy's button
+run had the secret set, printed "Pushing with the KIT_PUSH_TOKEN
+credential", rewrote the push URL correctly - and GitHub still refused
+the push *as a GitHub App*. The decisive clue was the refusal wording: a
+fine-grained PAT refusal says "a fine-grained personal access token";
+"GitHub App" means the automatic bot token did the talking. The
+mechanism: `actions/checkout` stores the bot token as repo-local config
+`http.https://github.com/.extraheader`, and that URL pattern matches
+*every* github.com URL - including the rewritten
+`https://x-access-token:...@github.com/...` push URL - with its
+Authorization header winning over the URL's own credentials. The kit-10
+rig never saw it because its origin is a file path, where the header
+does not exist; the github.com push had been flagged as the untested
+residual, and this was its live exercise.
+
+- Kit 13: `Invoke-KitPush` captures and removes every
+  `http.*.extraheader` repo-local entry before a token-path push and
+  restores them right after (so the race-retry's `pull --rebase` still
+  authenticates as the bot). Values are captured in memory only and are
+  never printed; the runner masks them regardless.
+- The refusal help is now credential-aware: a GitHub-App refusal with no
+  token in use still teaches the PAT setup; with the token in use it
+  names the override (kit predates 13) and points at the terminal route
+  for the one-time hop. The nudge issue's diagnosis sentence says the
+  same. README made no flat "refusal = missing secret" claim and needed
+  no change.
+- Rig limits: the header mechanics are unit-proven (capture/unset/
+  restore against a scratch repo) and the full sync flow is regression-
+  proven on the file-path rig; a real github.com token push can only be
+  proven live (local rigs have no network), and the next copy to press
+  the button on kit 13+ provides that proof for free.
